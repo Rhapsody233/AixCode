@@ -17,6 +17,22 @@ ASYNC_AGENT_ALLOWED_TOOLS = frozenset(
      "ToolSearch", "LoadSkill"}
 )
 
+# ch15：Coordinator Mode 白名单（写工具 WriteFile/EditFile 被排除）
+COORDINATOR_MODE_ALLOWED_TOOLS = frozenset(
+    {"Agent", "SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate",
+     "TeamCreate", "TeamDelete", "ReadFile", "Glob", "Grep", "Bash"}
+)
+
+# ch15：队员可见的协作工具
+TEAMMATE_COORDINATION_TOOLS = frozenset(
+    {"SendMessage", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate"}
+)
+
+# ch15：in-process 队员严格白名单（无 Cron，AixCode 不实现）
+IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = (
+    ASYNC_AGENT_ALLOWED_TOOLS | TEAMMATE_COORDINATION_TOOLS
+)
+
 
 def _is_mcp(name: str) -> bool:
     return name.startswith("mcp_")
@@ -46,4 +62,32 @@ def resolve_agent_tools(
         if def_whitelist is not None and name not in def_whitelist:
             continue
         new.register(tool)
+    return new
+
+
+def apply_coordinator_filter(registry: ToolRegistry) -> ToolRegistry:
+    """Coordinator Mode：重建一个只含 12 项白名单（MCP 直通）的新 ToolRegistry。"""
+    new = ToolRegistry()
+    for tool in registry.list_tools():
+        if _is_mcp(tool.name) or tool.name in COORDINATOR_MODE_ALLOWED_TOOLS:
+            new.register(tool)
+    return new
+
+
+def build_teammate_tools(registry: ToolRegistry, backend) -> ToolRegistry:
+    """按后端分流构造队员工具池：in-process 严格白名单；pane 仅剔除 TeamCreate/TeamDelete。"""
+    from aixcode.teams.models import BackendType
+
+    in_process = backend == BackendType.IN_PROCESS
+    new = ToolRegistry()
+    for tool in registry.list_tools():
+        name = tool.name
+        if _is_mcp(name):
+            new.register(tool)
+            continue
+        if in_process:
+            if name in IN_PROCESS_TEAMMATE_ALLOWED_TOOLS:
+                new.register(tool)
+        elif name not in ("TeamCreate", "TeamDelete"):
+            new.register(tool)
     return new

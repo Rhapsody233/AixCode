@@ -13,7 +13,12 @@ from aixcode.agents.trace import TraceManager
 from aixcode.app import AixCodeApp
 from aixcode.worktree import WorktreeManager
 from aixcode.client import AuthenticationError, create_client
-from aixcode.config import load_config, load_mcp_servers, load_raw_hooks
+from aixcode.config import (
+    load_config,
+    load_mcp_servers,
+    load_raw_hooks,
+    load_team_settings,
+)
 from aixcode.hooks import HookConfigError, HookEngine, load_hooks
 from aixcode.memory import MemoryManager
 from aixcode.conversation import ConversationManager
@@ -26,12 +31,20 @@ from aixcode.permissions import (
 )
 from aixcode.skills.executor import SkillExecutor
 from aixcode.skills.loader import SkillLoader
+from aixcode.teams.manager import TeamManager
 from aixcode.tools import create_default_registry
 from aixcode.tools.agent_tool import AgentTool
 from aixcode.tools.ask_user import AskUserTool
 from aixcode.tools.enter_worktree import EnterWorktreeTool
 from aixcode.tools.exit_worktree import ExitWorktreeTool
 from aixcode.tools.load_skill import LoadSkill
+from aixcode.tools.send_message import SendMessageTool
+from aixcode.tools.task_create import TaskCreateTool
+from aixcode.tools.task_get import TaskGetTool
+from aixcode.tools.task_list import TaskListTool
+from aixcode.tools.task_update import TaskUpdateTool
+from aixcode.tools.team_create import TeamCreateTool
+from aixcode.tools.team_delete import TeamDeleteTool
 from aixcode.tools.tool_search import ToolSearchTool
 
 
@@ -125,11 +138,19 @@ def main() -> int:
     registry.register(EnterWorktreeTool(worktree_manager))
     registry.register(ExitWorktreeTool(worktree_manager))
 
-    # ch13 SubAgent 系统：加载子 Agent 定义、建后台/追踪管理器、注册 Agent 工具
+    # ch15 AgentTeam 系统：读团队设置、建 TeamManager（复用 worktree/trace）
+    try:
+        teammate_mode, enable_coordinator_mode = load_team_settings()
+    except ValueError as e:
+        print(f"团队配置警告（已忽略）：{e}", file=sys.stderr)
+        teammate_mode, enable_coordinator_mode = "", False
+    trace_manager = TraceManager()
+    team_manager = TeamManager(worktree_manager, trace_manager)
+
+    # ch13 SubAgent 系统：加载子 Agent 定义、建后台管理器、注册 Agent 工具
     agent_loader = AgentLoader(cwd)
     agent_loader.load_all()
     task_manager = TaskManager()
-    trace_manager = TraceManager()
     agent_tool = AgentTool(
         agent_loader=agent_loader,
         task_manager=task_manager,
@@ -138,8 +159,24 @@ def main() -> int:
         provider_config=config,
         enable_fork=True,
         worktree_manager=worktree_manager,
+        team_manager=team_manager,
     )
     registry.register(agent_tool)
+
+    # ch15：注册团队七工具 + 写回主 Agent 的 team_manager（agent_id 已在构造时生成）
+    registry.register(
+        TeamCreateTool(
+            team_manager, agent, teammate_mode=teammate_mode, is_interactive=True,
+            enable_coordinator_mode=enable_coordinator_mode,
+        )
+    )
+    registry.register(TeamDeleteTool(team_manager, agent))
+    registry.register(SendMessageTool(team_manager, agent))
+    registry.register(TaskCreateTool(team_manager, agent))
+    registry.register(TaskGetTool(team_manager, agent))
+    registry.register(TaskListTool(team_manager, agent))
+    registry.register(TaskUpdateTool(team_manager, agent))
+    agent._team_manager = team_manager
 
     conversation = ConversationManager()
     asyncio.run(

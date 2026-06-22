@@ -137,3 +137,23 @@ def load_raw_hooks(path: str = "config.yaml") -> list[dict]:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return list(data.get("hooks") or [])
+
+
+# --- 团队配置（ch15）-------------------------------------------------------
+
+def load_team_settings(path: str = "config.yaml") -> tuple[str, bool]:
+    """读 ``teammate_mode``（仅 '' 或 'in-process'）与 ``enable_coordinator_mode``。
+
+    缺文件返回 ``("", False)``；非法 teammate_mode 抛 ValueError。
+    """
+    if not os.path.exists(path):
+        return ("", False)
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    teammate_mode = data.get("teammate_mode") or ""
+    if teammate_mode not in ("", "in-process"):
+        raise ValueError(
+            f"teammate_mode 非法（仅 '' 或 'in-process'）：{teammate_mode!r}"
+        )
+    enable_coordinator_mode = bool(data.get("enable_coordinator_mode", False))
+    return (teammate_mode, enable_coordinator_mode)

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
@@ -267,6 +268,11 @@ class Agent:
         self._skill_catalog: str = ""
         # ch13 SubAgent：fork 时由 AgentTool 读取的当前活跃对话
         self.active_conversation = None
+        # ch15 AgentTeam：本 Agent 的稳定标识 + 团队上下文（mailbox 寻址、协调模式）
+        self.agent_id = uuid.uuid4().hex[:12]
+        self.team_name: str = ""
+        self.coordinator_mode: bool = False
+        self._team_manager = None
         # ch08 上下文管理
         self.context_window = context_window
         self.session_dir = ensure_session_dir(work_dir)
@@ -332,6 +338,26 @@ class Agent:
         memories = self.memory_manager.load() if self.memory_manager else ""
         conversation.inject_long_term_memory(self.instructions_content, memories)
 
+    async def _consume_mailbox(self, conversation) -> None:
+        """ch15：把团队邮箱里发给本 Agent 的消息转 user message 注入对话；异常吞掉。
+
+        仅当 team_name 与 _team_manager 都非空时生效（Lead 与 in-process 队员共用）。
+        """
+        if not (self.team_name and self._team_manager):
+            return
+        try:
+            mailbox = self._team_manager.get_mailbox(self.team_name)
+            if mailbox is None:
+                return
+            for msg in mailbox.consume(self.agent_id):
+                if msg.message_type == "text":
+                    prefix = f"[Message from {msg.from_agent}] "
+                else:
+                    prefix = f"[{msg.message_type} from {msg.from_agent}] "
+                conversation.add_user_message(prefix + msg.content)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("消费团队邮箱失败：%s", e)
+
     async def run(self, conversation) -> AsyncIterator[AgentEvent]:
         """多轮 ReAct 循环：调模型→执行工具→回灌→下一轮；无工具调用即结束。"""
         # 暴露当前活跃对话给 AgentTool 的 fork 路径（ch13）
@@ -351,6 +377,9 @@ class Agent:
             if iteration > self.max_iterations:
                 yield ErrorEvent(f"超过最大轮数 {self.max_iterations}，已停止")
                 return
+
+            # ch15：每轮开头先消费团队邮箱（在调 LLM 之前，避免一轮延迟）
+            await self._consume_mailbox(conversation)
 
             # ch12：turn_start 钩子
             for ev in await self._emit_hooks(
@@ -394,6 +423,7 @@ class Agent:
 
             system = build_system_prompt(
                 deferred_tools=self.registry.get_deferred_tool_names(),
+                coordinator_mode=self.coordinator_mode,
             )
             tools = self.registry.get_all_schemas()
 

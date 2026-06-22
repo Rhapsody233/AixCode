@@ -90,9 +90,14 @@ def load_project_instructions(work_dir: str) -> str:
 
 
 def build_system_prompt(
-    custom_instructions: str = "", deferred_tools: list[str] | None = None
+    custom_instructions: str = "",
+    deferred_tools: list[str] | None = None,
+    coordinator_mode: bool = False,
 ) -> str:
-    """拼装稳定的系统提示。环境与 Plan 提醒不在此处（走对话通道）。"""
+    """拼装稳定的系统提示。环境与 Plan 提醒不在此处（走对话通道）。
+
+    coordinator_mode 为真时追加一段协调模式引导（ch15）。
+    """
     builder = PromptBuilder()
     for section in _FIXED_SECTIONS:
         builder.add(section)
@@ -108,6 +113,12 @@ def build_system_prompt(
     if custom_instructions.strip():
         builder.add(
             PromptSection("CustomInstructions", 60, "# 项目指令\n" + custom_instructions.strip())
+        )
+    if coordinator_mode:
+        from aixcode.teams.coordinator import get_coordinator_system_prompt
+
+        builder.add(
+            PromptSection("CoordinatorMode", 70, get_coordinator_system_prompt())
         )
     return builder.build()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import uuid
 
 from pydantic import BaseModel, Field
 
@@ -10,7 +11,7 @@ from aixcode.agents.fork import ForkError, build_forked_messages
 from aixcode.agents.loader import AgentLoader
 from aixcode.agents.parser import AgentDef
 from aixcode.agents.task_manager import TaskManager
-from aixcode.agents.tool_filter import resolve_agent_tools
+from aixcode.agents.tool_filter import build_teammate_tools, resolve_agent_tools
 from aixcode.agents.trace import TraceManager
 from aixcode.client import create_client
 from aixcode.commands.handlers.mode import parse_mode_name
@@ -54,6 +55,16 @@ class AgentToolParams(BaseModel):
     model: str = ""
     run_in_background: bool = False
     isolation: str | None = None
+    team_name: str | None = Field(None, description="非空时把队员 spawn 进该团队（ch15）")
+    name: str = Field("", description="团队队员的名字（team_name 非空时用）")
+
+
+TEAMMATE_ADDENDUM = """[TEAM CONTEXT]
+You are '{name}', a teammate in team '{team}'. You collaborate with other teammates.
+Use SendMessage to talk to them by name (or broadcast with to='*'), and TaskCreate /
+TaskList / TaskUpdate to coordinate shared work. When your task is done, just stop —
+the Lead is notified automatically.
+[/TEAM CONTEXT]"""
 
 
 def _build_description(loader: AgentLoader, enable_fork: bool) -> str:
@@ -90,6 +101,7 @@ class AgentTool(Tool):
         provider_config: ProviderConfig,
         enable_fork: bool = False,
         worktree_manager=None,
+        team_manager=None,
     ) -> None:
         self.agent_loader = agent_loader
         self.task_manager = task_manager
@@ -98,6 +110,7 @@ class AgentTool(Tool):
         self.provider_config = provider_config
         self.enable_fork = enable_fork
         self.worktree_manager = worktree_manager
+        self._team_manager = team_manager
         # 实例级描述覆盖类属性（动态拼可用类型）
         self.description = _build_description(agent_loader, enable_fork)
 
@@ -165,7 +178,9 @@ class AgentTool(Tool):
         )
 
     async def execute(self, params: AgentToolParams) -> ToolResult:
-        """三路径分发：未知类型报错 / fork（强制后台）/ 定义式（sync·background）。"""
+        """分发：team_name 非空走队员 spawn；否则未知类型报错 / fork / 定义式。"""
+        if params.team_name:
+            return await self._execute_as_teammate(params)
         if not params.subagent_type:
             return await self._execute_fork(params)
         definition = self.agent_loader.get(params.subagent_type)
@@ -229,6 +244,136 @@ class AgentTool(Tool):
                 f"\n\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
             )
         return ToolResult(text)
+
+    # --- ch15：把队员 spawn 进团队 ---
+
+    @staticmethod
+    def _unique_teammate_name(team, base_name: str) -> str:
+        """team 内同名冲突自动加 -2/-3/... 后缀。"""
+        if team.get_member(base_name) is None:
+            return base_name
+        i = 2
+        while team.get_member(f"{base_name}-{i}") is not None:
+            i += 1
+        return f"{base_name}-{i}"
+
+    async def _execute_as_teammate(self, params: AgentToolParams) -> ToolResult:
+        """team_name 分支：建独立 worktree + 受限工具池，按后端 spawn 一个队员，立即返回。"""
+        from aixcode.teams.models import BackendType, TeammateInfo, resolve_team_dir
+        from aixcode.teams.spawn_inprocess import spawn_inprocess_teammate
+        from aixcode.worktree.integration import build_worktree_notice
+
+        if self._team_manager is None or self.worktree_manager is None:
+            return ToolResult(
+                "团队功能不可用（team_manager / worktree_manager 未装配）。", is_error=True
+            )
+        team = self._team_manager.get_team(params.team_name)
+        if team is None:
+            return ToolResult(
+                f"团队 {params.team_name!r} 不存在，请先用 TeamCreate 创建。", is_error=True
+            )
+
+        teammate_name = self._unique_teammate_name(team, params.name or "teammate")
+
+        # 解析 subagent_type / fork：无 type + enable_fork 走 fork，否则空白 builtin AgentDef
+        forked_conv = None
+        if params.subagent_type:
+            definition = self.agent_loader.get(params.subagent_type)
+            if definition is None:
+                available = ", ".join(n for n, _ in self.agent_loader.get_catalog())
+                return ToolResult(
+                    f"未知 subagent_type: {params.subagent_type}。可用类型：{available}",
+                    is_error=True,
+                )
+        else:
+            definition = AgentDef(
+                agent_type="teammate", when_to_use="teammate", system_prompt="",
+                source="builtin",
+            )
+            if self.enable_fork:
+                conversation = getattr(self.parent_agent, "active_conversation", None)
+                if conversation is not None:
+                    try:
+                        forked_conv = build_forked_messages(conversation, params.prompt)
+                    except ForkError:
+                        forked_conv = None
+
+        # 建独立 worktree
+        wt_slug = f"team-{params.team_name}/{teammate_name}"
+        try:
+            wt = await self.worktree_manager.create(wt_slug, "HEAD")
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(f"创建队员 worktree 失败：{e}", is_error=True)
+
+        backend = self._team_manager.detect_backend()
+        registry = build_teammate_tools(self.parent_agent.registry, backend)
+        model = self._select_model(params, definition)
+        client = self._create_client_for_model(model) if model else None
+        sub_agent = self._build_sub_agent(definition, registry, client, wt.path)
+
+        agent_id = uuid.uuid4().hex[:12]
+        sub_agent.agent_id = agent_id
+        sub_agent.team_name = params.team_name
+        sub_agent._team_manager = self._team_manager
+
+        info = TeammateInfo(
+            name=teammate_name, agent_id=agent_id, agent_type=definition.agent_type,
+            model=model or "", worktree_path=wt.path, backend_type=backend.value,
+            is_active=True,
+        )
+        self._team_manager.register_member(params.team_name, info)
+
+        notice = build_worktree_notice(getattr(self.parent_agent, "work_dir", "."), wt.path)
+        addendum = TEAMMATE_ADDENDUM.format(name=teammate_name, team=params.team_name)
+        task_prompt = f"{addendum}\n\n{notice}\n\n{params.prompt}"
+
+        if backend == BackendType.IN_PROCESS:
+            if forked_conv is not None:
+                handle = spawn_inprocess_teammate(
+                    sub_agent, "", teammate_name, conversation=forked_conv
+                )
+            else:
+                handle = spawn_inprocess_teammate(sub_agent, task_prompt, teammate_name)
+            handle.task.add_done_callback(
+                lambda _t, aid=agent_id: self._team_manager.on_teammate_completed(aid)
+            )
+            self._team_manager.register_inprocess_handle(agent_id, handle)
+        else:
+            mailbox_dir = str(resolve_team_dir(params.team_name) / "mailbox")
+            pane_id = self._spawn_pane(
+                backend, params.team_name, teammate_name, mailbox_dir, wt.path,
+                task_prompt, params.subagent_type, model or "",
+            )
+            self._team_manager.register_pane_id(agent_id, pane_id)
+
+        return ToolResult(
+            f"已把队员 '{teammate_name}' spawn 进团队 '{params.team_name}'"
+            f"（后端 {backend.value}，worktree {wt.path}）。"
+        )
+
+    @staticmethod
+    def _spawn_pane(
+        backend, team_name, teammate_name, mailbox_dir, work_dir, prompt,
+        agent_type, model,
+    ) -> str:
+        """pane 后端 spawn（tmux / iTerm2），返回 pane/session id。【本机不验收】"""
+        from aixcode.teams.models import BackendType
+
+        if backend == BackendType.TMUX:
+            from aixcode.teams.spawn_tmux import spawn_tmux_teammate
+
+            pane = spawn_tmux_teammate(
+                team_name, teammate_name, mailbox_dir, work_dir, prompt,
+                agent_type=agent_type, model=model,
+            )
+            return pane.pane_id
+        from aixcode.teams.spawn_iterm2 import spawn_iterm2_teammate
+
+        pane = spawn_iterm2_teammate(
+            team_name, teammate_name, mailbox_dir, work_dir, prompt,
+            agent_type=agent_type, model=model,
+        )
+        return pane.session_id
 
     async def _execute_fork(self, params: AgentToolParams) -> ToolResult:
         if not self.enable_fork:
