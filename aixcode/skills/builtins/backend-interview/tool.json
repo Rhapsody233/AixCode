@@ -1,0 +1,14 @@
+{
+  "name": "parse_resume",
+  "description": "解析简历文件（纯文本/markdown），抽取技术栈、项目经历与年限要点",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "file_path": {
+        "type": "string",
+        "description": "简历文件的路径"
+      }
+    },
+    "required": ["file_path"]
+  }
+}

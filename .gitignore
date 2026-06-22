@@ -1,0 +1,15 @@
+# 运行时产物（会话、权限、记忆、worktree）
+.aixcode/
+.axicode/
+
+# 含密钥，绝不提交
+config.yaml
+
+# Python 缓存与测试产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# 杂项
+notes.txt
