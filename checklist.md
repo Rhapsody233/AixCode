@@ -72,5 +72,5 @@
 - [x] `spec.md` 为 ch15 自包含版（§0 含 ch14 worktree + work_dir 修复、ch15 当前目标、适配差异）
 - [x] `tasks.md` 为 ch15 T1-T16
 - [x] `checklist.md` 为本文件并逐项验收
-- [ ] commit 信息标注 `ch15`（待用户确认后提交）
+- [x] commit 信息标注 `ch15`（已提交至 ch15-agentteam 分支）
 - [x] 清理临时文件 `_mewcode_ch15_ref.tmp.md`（参考用途完成后删除）
