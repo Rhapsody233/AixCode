@@ -583,26 +583,36 @@ class Agent:
         return f"{tc.tool_name}({content})" if content else tc.tool_name
 
     async def _run_tool(self, tc: ToolCallComplete) -> ToolResult:
-        """查工具 + 参数校验 + 执行 + 结果截断。失败包成结构化错误。"""
-        tool = self.registry.get(tc.tool_name)
-        if tool is None:
-            return ToolResult(f"Error: unknown tool: {tc.tool_name}", is_error=True)
-        if not self.registry.is_enabled(tc.tool_name):
-            return ToolResult(f"Error: tool disabled: {tc.tool_name}", is_error=True)
+        """查工具 + 参数校验 + 执行 + 结果截断。失败包成结构化错误。
 
+        执行期间把本 Agent 的 work_dir 注入 contextvar，文件工具据此解析相对路径
+        （子 Agent / worktree 隔离的关键）；执行后恢复，避免泄漏到其他 Agent。
+        """
+        from aixcode.tools.workdir import pop_work_dir, push_work_dir
+
+        token = push_work_dir(self.work_dir)
         try:
-            params = tool.params_model.model_validate(tc.arguments)
-        except ValidationError as e:
-            return ToolResult(f"Error: invalid arguments: {e}", is_error=True)
+            tool = self.registry.get(tc.tool_name)
+            if tool is None:
+                return ToolResult(f"Error: unknown tool: {tc.tool_name}", is_error=True)
+            if not self.registry.is_enabled(tc.tool_name):
+                return ToolResult(f"Error: tool disabled: {tc.tool_name}", is_error=True)
 
-        result = await tool.execute(params)
-        self._snapshot_for_recovery(tc, result)
-        if len(result.output) > MAX_OUTPUT_CHARS:
-            return ToolResult(
-                result.output[:MAX_OUTPUT_CHARS] + "… (output truncated)",
-                is_error=result.is_error,
-            )
-        return result
+            try:
+                params = tool.params_model.model_validate(tc.arguments)
+            except ValidationError as e:
+                return ToolResult(f"Error: invalid arguments: {e}", is_error=True)
+
+            result = await tool.execute(params)
+            self._snapshot_for_recovery(tc, result)
+            if len(result.output) > MAX_OUTPUT_CHARS:
+                return ToolResult(
+                    result.output[:MAX_OUTPUT_CHARS] + "… (output truncated)",
+                    is_error=result.is_error,
+                )
+            return result
+        finally:
+            pop_work_dir(token)
 
     def _snapshot_for_recovery(self, tc: ToolCallComplete, result: ToolResult) -> None:
         """ReadFile 成功后把整文件字节快照写入 recovery_state（压缩后恢复用）。"""

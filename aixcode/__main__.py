@@ -11,6 +11,7 @@ from aixcode.agents.loader import AgentLoader
 from aixcode.agents.task_manager import TaskManager
 from aixcode.agents.trace import TraceManager
 from aixcode.app import AixCodeApp
+from aixcode.worktree import WorktreeManager
 from aixcode.client import AuthenticationError, create_client
 from aixcode.config import load_config, load_mcp_servers, load_raw_hooks
 from aixcode.hooks import HookConfigError, HookEngine, load_hooks
@@ -28,6 +29,8 @@ from aixcode.skills.loader import SkillLoader
 from aixcode.tools import create_default_registry
 from aixcode.tools.agent_tool import AgentTool
 from aixcode.tools.ask_user import AskUserTool
+from aixcode.tools.enter_worktree import EnterWorktreeTool
+from aixcode.tools.exit_worktree import ExitWorktreeTool
 from aixcode.tools.load_skill import LoadSkill
 from aixcode.tools.tool_search import ToolSearchTool
 
@@ -112,6 +115,16 @@ def main() -> int:
     agent.set_skill_catalog(_build_skill_catalog(skill_loader))
     skill_executor = SkillExecutor(agent, client, config.protocol)
 
+    # ch14 Worktree 系统：建 manager、恢复上次 session、注册两工具
+    worktree_manager = WorktreeManager(
+        repo_root=cwd, file_cache=None, symlink_directories=[]
+    )
+    restored = worktree_manager.restore_session()
+    if restored is not None:
+        agent.work_dir = restored.worktree_path
+    registry.register(EnterWorktreeTool(worktree_manager))
+    registry.register(ExitWorktreeTool(worktree_manager))
+
     # ch13 SubAgent 系统：加载子 Agent 定义、建后台/追踪管理器、注册 Agent 工具
     agent_loader = AgentLoader(cwd)
     agent_loader.load_all()
@@ -124,6 +137,7 @@ def main() -> int:
         parent_agent=agent,
         provider_config=config,
         enable_fork=True,
+        worktree_manager=worktree_manager,
     )
     registry.register(agent_tool)
 
@@ -139,6 +153,7 @@ def main() -> int:
             hook_engine=hook_engine,
             task_manager=task_manager,
             trace_manager=trace_manager,
+            worktree_manager=worktree_manager,
         ).run()
     )
     return 0

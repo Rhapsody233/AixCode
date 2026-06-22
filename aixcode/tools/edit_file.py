@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel
 
 from aixcode.tools.base import Tool, ToolResult
+from aixcode.tools.workdir import resolve_path
 
 
 class EditFileParams(BaseModel):
@@ -25,7 +24,7 @@ class EditFile(Tool):
     category = "write"
 
     async def execute(self, params: EditFileParams) -> ToolResult:
-        path = Path(params.file_path)
+        path = resolve_path(params.file_path)
         if not path.is_file():
             return ToolResult(f"Error: file not found: {params.file_path}", is_error=True)
 

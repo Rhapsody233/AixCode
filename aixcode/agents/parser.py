@@ -27,6 +27,7 @@ class AgentDef:
     max_turns: int = 50
     permission_mode: str = "default"
     background: bool = False
+    isolation: str | None = None
     file_path: str | None = None
     source: str = "builtin"
 
@@ -89,6 +90,7 @@ def parse_agent_file(path: str, source: str = "builtin") -> AgentDef:
         max_turns=max_turns,
         permission_mode=permission_mode,
         background=bool(meta.get("background", False)),
+        isolation=meta.get("isolation") or None,
         file_path=path,
         source=source,
     )

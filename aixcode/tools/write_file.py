@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel
 
 from aixcode.tools.base import Tool, ToolResult
+from aixcode.tools.workdir import resolve_path
 
 
 class WriteFileParams(BaseModel):
@@ -24,7 +23,7 @@ class WriteFile(Tool):
     category = "write"
 
     async def execute(self, params: WriteFileParams) -> ToolResult:
-        path = Path(params.file_path)
+        path = resolve_path(params.file_path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(params.content, encoding="utf-8")

@@ -49,6 +49,10 @@ _CHOICE_MAP = {
 _EXIT_COMMANDS = ("/exit", "/quit")
 _VERSION = "0.1.0"
 
+# worktree 后台过期清理节奏
+_STALE_CLEANUP_INTERVAL = 3600.0  # 每小时扫一轮
+_STALE_CUTOFF_HOURS = 24.0  # 24 小时未动的孤儿才清
+
 _LOGO = r"""
   /\_/\     AixCode v{version}
  ( o.o )    {model}
@@ -170,6 +174,7 @@ class AixCodeApp:
         hook_engine=None,
         task_manager=None,
         trace_manager=None,
+        worktree_manager=None,
     ) -> None:
         self.agent = agent
         self.conversation = conversation
@@ -180,6 +185,8 @@ class AixCodeApp:
         self.hook_engine = hook_engine
         self.task_manager = task_manager
         self.trace_manager = trace_manager
+        self.worktree_manager = worktree_manager
+        self._stale_cleanup_task = None
         self._mcp_manager: MCPManager | None = None
         self.session_manager: SessionManager | None = None
         self.session = None
@@ -191,6 +198,54 @@ class AixCodeApp:
             register_skill_commands(
                 self.command_registry, skill_loader, skill_executor
             )
+        if worktree_manager is not None:
+            from aixcode.commands.handlers.worktree import create_worktree_command
+
+            self.command_registry.register_sync(
+                create_worktree_command(worktree_manager)
+            )
+            self._register_worktree_cache_clear()
+
+    def _register_worktree_cache_clear(self) -> None:
+        """切 worktree 时同步 Agent 的 work_dir/沙箱、清文件读快照并重载项目指令，
+        防用旧目录内容做决策。"""
+        agent = self.agent
+
+        def _set_work_dir(path: str) -> None:
+            agent.work_dir = path
+            checker = getattr(agent, "permission_checker", None)
+            if checker is not None:
+                from aixcode.permissions import PathSandbox
+
+                checker.sandbox = PathSandbox(project_root=path)
+
+        def _clear() -> None:
+            from aixcode.context import RecoveryState
+            from aixcode.memory import load_instructions
+
+            agent.recovery_state = RecoveryState()
+            agent.instructions_content = load_instructions(agent.work_dir)
+
+        self.worktree_manager.add_work_dir_callback(_set_work_dir)
+        self.worktree_manager.add_cache_clear_callback(_clear)
+
+    def _start_worktree_cleanup(self) -> None:
+        """启动孤儿 worktree 后台过期清理 task（manager 非空时）。"""
+        if self.worktree_manager is None:
+            return
+        from aixcode.worktree import start_stale_cleanup_task
+
+        self._stale_cleanup_task = asyncio.create_task(
+            start_stale_cleanup_task(
+                self.worktree_manager,
+                _STALE_CLEANUP_INTERVAL,
+                _STALE_CUTOFF_HOURS,
+            )
+        )
+
+    def _stop_worktree_cleanup(self) -> None:
+        if self._stale_cleanup_task is not None:
+            self._stale_cleanup_task.cancel()
 
     def _print_banner(self) -> None:
         self.console.print(
@@ -214,9 +269,11 @@ class AixCodeApp:
         await self._init_mcp()
         self._init_session()
         await self._emit_app_hooks("startup")
+        self._start_worktree_cleanup()
         try:
             await self._repl_loop()
         finally:
+            self._stop_worktree_cleanup()
             await self._emit_app_hooks("shutdown")
             await self._shutdown_mcp()
             if self.session is not None:

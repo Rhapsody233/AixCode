@@ -7,6 +7,7 @@ import asyncio
 from pydantic import BaseModel
 
 from aixcode.tools.base import Tool, ToolResult
+from aixcode.tools.workdir import current_work_dir
 
 MAX_TIMEOUT = 600
 
@@ -32,6 +33,7 @@ class Bash(Tool):
             params.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=current_work_dir(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)

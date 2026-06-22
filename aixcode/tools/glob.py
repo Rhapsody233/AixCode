@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel
 
 from aixcode.tools.base import SKIP_DIRS, Tool, ToolResult
+from aixcode.tools.workdir import resolve_path
 
 
 class GlobParams(BaseModel):
@@ -22,7 +21,7 @@ class Glob(Tool):
     is_concurrency_safe = True
 
     async def execute(self, params: GlobParams) -> ToolResult:
-        base = Path(params.path)
+        base = resolve_path(params.path)
         matches = []
         for p in base.glob(params.pattern):
             if not p.is_file():

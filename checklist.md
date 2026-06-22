@@ -1,91 +1,79 @@
-# ch13: SubAgent 系统 Checklist（AixCode / Python 版）
+# ch14: Worktree 系统 Checklist（AixCode / Python 版）
 
-> 所有条目必须可勾选、可观测。验收方式写在每项后面的括号里。操作目录 `d:\Agent\AixCode`，命令用 Bash 工具的 `grep`/`python` 即可。
+> 所有条目必须可勾选、可观测。验收方式写在每项后面的括号里。操作目录 `d:\Agent\AixCode`，命令用 Bash 工具的 `grep`/`python`/`git` 即可。
 > 全局背景见 [spec.md](spec.md) §0。
 
 ## 1. 实现完整性
 
-### 1.1 定义与加载
+### 1.1 slug + 模型 + 变更检测
 
-- [x] `@dataclass AgentDef` 11 字段（`agent_type/when_to_use/system_prompt/tools/disallowed_tools/model/max_turns/permission_mode/background/file_path/source`），默认 `model="inherit"/max_turns=50/permission_mode="default"`（`grep -n "class AgentDef" aixcode/agents/parser.py` + 单测）
-- [x] `VALID_MODELS={"inherit","deepseek-chat","deepseek-pro",""}` + `VALID_PERMISSION_MODES={"","strict","default","accept","bypass"}` + `AgentParseError`（`grep -n "VALID_MODELS\|VALID_PERMISSION_MODES\|class AgentParseError" aixcode/agents/parser.py`）
-- [x] `parse_agent_file` 校验 name/description 必填 + model/permissionMode 白名单 + maxTurns 正整数（`grep -n "def parse_agent_file\|def parse_frontmatter" aixcode/agents/parser.py` + 单测逐项）
-- [x] 三档内置 `aixcode/agents/builtins/{general-purpose,plan,explore}.md` 存在；`plan` 含 `disallowedTools: [Agent, EditFile, WriteFile]` + `maxTurns: 15` + `model: deepseek-pro`；`explore` 含 `tools: [ReadFile, Grep, Glob]` + `maxTurns: 30` + `model: deepseek-chat`
-- [x] `AgentLoader` 三级搜索（`PROJECT_AGENTS_DIR=".aixcode/agents"`/`USER_AGENTS_DIR="~/.aixcode/agents"`/`importlib.resources` 内置）+ 项目覆盖内置 + 热重载（`grep -n "PROJECT_AGENTS_DIR\|USER_AGENTS_DIR\|def load_all\|def get\b" aixcode/agents/loader.py` + 单测）
-- [x] `enable_verification` flag 守 verification 内置（默认不出现；`grep -n "enable_verification" aixcode/agents/loader.py`，若提供该内置则单测覆盖）
+- [x] `MAX_SLUG_LENGTH=64` + `validate_slug`（空名/长度/空段/`.`·`..`/非法字符五类）+ `flatten_slug`（`/`→`+`）（`grep -n "MAX_SLUG_LENGTH\|def validate_slug\|def flatten_slug" aixcode/worktree/slug.py` + 单测）
+- [x] `@dataclass Worktree`（6 字段 `name/path/branch/based_on/head_commit/created`，created 默认 datetime）+ `@dataclass WorktreeSession`（7 字段，`session_id`/`hook_based` 有默认）（`grep -n "class Worktree\|class WorktreeSession" aixcode/worktree/models.py`）
+- [x] `Changes` + `CleanupResult` + `count_worktree_changes`（git 异常 fail-closed 置 1）+ `has_worktree_changes` + `has_unpushed_commits`（git 失败返 True）（`grep -n "class Changes\|class CleanupResult\|def count_worktree_changes\|def has_worktree_changes\|def has_unpushed_commits" aixcode/worktree/changes.py` + 单测）
+- [x] `changes._run_git` 强制 `GIT_ENV`(`GIT_TERMINAL_PROMPT=0`/`GIT_ASKPASS=""`) + `stdin=DEVNULL` + `timeout=30`（`grep -n "GIT_ENV\|GIT_TERMINAL_PROMPT\|DEVNULL\|timeout=30" aixcode/worktree/changes.py`）
 
-### 1.2 工具过滤
+### 1.2 integration + session + setup
 
-- [x] `ALL_AGENT_DISALLOWED_TOOLS=frozenset({"Agent","AskUser"})`（防递归）（`grep -n "ALL_AGENT_DISALLOWED_TOOLS" aixcode/agents/tool_filter.py`）
-- [x] `CUSTOM_AGENT_DISALLOWED_TOOLS` + `ASYNC_AGENT_ALLOWED_TOOLS` 常量（`grep -n "CUSTOM_AGENT_DISALLOWED_TOOLS\|ASYNC_AGENT_ALLOWED_TOOLS" aixcode/agents/tool_filter.py`）
-- [x] `resolve_agent_tools` 四层过滤 + MCP 直通，返回新 `ToolRegistry`（`grep -n "def resolve_agent_tools\|mcp_" aixcode/agents/tool_filter.py` + 单测各层）
+- [x] `WORKTREE_NOTICE_TEMPLATE` 含 `[WORKTREE CONTEXT]` 标记 + `{parent_cwd}`/`{wt_path}` 占位 + "re-read files before editing" 关键句（`grep -n "WORKTREE CONTEXT\|re-read files\|{wt_path}\|{parent_cwd}" aixcode/worktree/integration.py`）
+- [x] `generate_worktree_name`（`agent-`+`secrets.token_hex(4)`）+ `build_worktree_notice`（`grep -n "def generate_worktree_name\|def build_worktree_notice\|token_hex" aixcode/worktree/integration.py` + 单测）
+- [x] `SESSION_FILENAME="worktree_session.json"` + `save_worktree_session`（None 写 `"{}"`）+ `load_worktree_session`（容忍缺失/坏 JSON/空 dict/缺字段全返 None）（`grep -n "SESSION_FILENAME\|def save_worktree_session\|def load_worktree_session" aixcode/worktree/session.py` + 单测）
+- [x] `LOCAL_CONFIG_FILES=["settings.local.json",".env"]` + `perform_post_creation_setup` 依序 A/B/C/D + `_copy_ignored_files` 单文件失败 continue（`grep -n "LOCAL_CONFIG_FILES\|def perform_post_creation_setup\|def _copy_local_configs\|def _setup_git_hooks\|def _create_symlinks\|def _copy_ignored_files" aixcode/worktree/setup.py` + 单测）
 
-### 1.3 Fork
+### 1.3 WorktreeManager
 
-- [x] `FORK_BOILERPLATE_TAG="<fork_boilerplate>"` + `FORK_BOILERPLATE` + `ForkError`（`grep -n "FORK_BOILERPLATE_TAG\|FORK_BOILERPLATE\|class ForkError" aixcode/agents/fork.py`）
-- [x] `build_forked_messages` 嵌套 fork 拒绝（扫 TAG）+ `copy.deepcopy` + 补 `"interrupted"` 占位（`grep -n "def build_forked_messages\|deepcopy\|interrupted\|Cannot fork" aixcode/agents/fork.py` + 单测）
+- [x] `WorktreeError` + `WorktreeManager.__init__`（`_lock=asyncio.Lock()`/`active`/`current_session`/`worktree_dir` 默认 `.aixcode/worktrees`）（`grep -n "class WorktreeError\|class WorktreeManager\|asyncio.Lock\|worktrees" aixcode/worktree/manager.py`）
+- [x] `read_worktree_head_sha` 静态方法完整链路（`.git→gitdir→commondir→HEAD→loose/packed-refs`）失败返 None 且无 git 子进程（`grep -n "def read_worktree_head_sha\|commondir\|packed-refs" aixcode/worktree/manager.py` + 单测）
+- [x] `manager._run_git` 强制 `GIT_ENV` + `cwd=cwd or repo_root` + `stdin=DEVNULL` + `timeout=60`（`grep -n "def _run_git\|timeout=60\|DEVNULL" aixcode/worktree/manager.py`）
+- [x] `create`（快速恢复二选一 + 大写 `-B`）+ `enter`（清缓存+写 session）+ `exit`（remove 未 discard 跑变更保护）（`grep -n "def create\|def enter\|def exit\|worktree add -B\|_clear_all_caches" aixcode/worktree/manager.py` + 单测）
+- [x] `_remove_worktree` 含 `await asyncio.sleep(0.1)` 等 lockfile + `auto_cleanup`（脏 kept=True/干净 kept=False）+ `restore_session`（读不到 HEAD 时反向清脏）（`grep -n "def _remove_worktree\|asyncio.sleep(0.1)\|def auto_cleanup\|def restore_session" aixcode/worktree/manager.py` + 单测）
+- [x] `add_cache_clear_callback` + `_clear_all_caches`（`grep -n "def add_cache_clear_callback\|def _clear_all_caches" aixcode/worktree/manager.py`）
 
-### 1.4 追踪与后台
+### 1.4 cleanup
 
-- [x] `TraceNode` + `TraceManager`（create/update/complete/get_tree/get_total_tokens，三元组 agent_id/parent_id/trace_id）（`grep -n "class TraceNode\|class TraceManager\|def get_tree\|def get_total_tokens" aixcode/agents/trace.py` + 单测）
-- [x] `BackgroundTask` + `TaskManager`（`_notify_queue: asyncio.Queue`，launch/_run_background/adopt_running/cancel/poll_completed，状态 running/completed/failed/cancelled）（`grep -n "class BackgroundTask\|class TaskManager\|_notify_queue\|def poll_completed\|def adopt_running" aixcode/agents/task_manager.py` + 单测状态机）
-- [x] `MAX_NOTIFICATION_RESULT_LENGTH=5000` + `format_task_notification`(`<task-notification>` 含 Task ID/Agent/Status/Elapsed/Tokens/Result，超长截断) + `inject_task_notifications`（`grep -n "MAX_NOTIFICATION_RESULT_LENGTH\|task-notification\|def inject_task_notifications" aixcode/agents/notification.py` + 单测）
+- [x] `EPHEMERAL_PATTERNS` 5 条正则（`^agent-[0-9a-f]{8}$` 等）+ `_is_ephemeral`（`grep -n "EPHEMERAL_PATTERNS\|def _is_ephemeral" aixcode/worktree/cleanup.py` + 单测）
+- [x] `cleanup_stale_worktrees` 三层过滤顺序固定（L1 命名→L2 时态→L3 git fail-closed）+ `start_stale_cleanup_task` 死循环异常 warning 不抛（`grep -n "def cleanup_stale_worktrees\|def start_stale_cleanup_task\|has_unpushed_commits\|has_worktree_changes" aixcode/worktree/cleanup.py` + 单测）
 
-### 1.5 AgentTool
+### 1.5 工具与命令
 
-- [x] `AgentToolParams`（必填 prompt/description，可选 subagent_type/model/run_in_background）（`grep -n "class AgentToolParams" aixcode/tools/agent_tool.py`）
-- [x] `AgentTool(Tool)`：`name="Agent"`、`category="command"`、`is_concurrency_safe=False`；构造参数含 `agent_loader/task_manager/trace_manager/parent_agent/provider_config/enable_fork`（`grep -n "class AgentTool\|name = \"Agent\"\|category" aixcode/tools/agent_tool.py`）
-- [x] `execute` 三路径（未知类型报错列可用 / fork 关闭报错 / sync·background）+ `is_background = run_in_background or definition.background`（`grep -n "def execute\|is_background\|build_forked_messages\|run_to_completion\|task_manager.launch" aixcode/tools/agent_tool.py` + 单测）
-- [x] 模型路由 `_select_model` + `_create_client_for_model`（inherit/deepseek-chat/deepseek-pro）（`grep -n "_select_model\|_create_client_for_model\|deepseek-pro" aixcode/tools/agent_tool.py` + 单测）
-- [x] 子 Agent 独立 `PermissionChecker` 且复用父 `hook_engine`（`grep -n "PermissionChecker\|hook_engine\|PathSandbox" aixcode/tools/agent_tool.py`）
+- [x] `EnterWorktreeTool`（`name="EnterWorktree"`/`should_defer=False`/`is_concurrency_safe=False`；已有 session 拒绝；默认名 `wt-`）（`grep -n "class EnterWorktreeTool\|EnterWorktree\|Already in a worktree" aixcode/tools/enter_worktree.py` + 单测）
+- [x] `ExitWorktreeTool`（`action` 必填；无 session no-op；remove 变更保护单复数正确）（`grep -n "class ExitWorktreeTool\|No-op\|uncommitted\|commit" aixcode/tools/exit_worktree.py` + 单测）
+- [x] `create_worktree_command`（`name="worktree"`/`aliases=["wt"]`/子命令 create/list/enter/exit/status）（`grep -n "def create_worktree_command\|def _handle_create\|def _handle_list\|def _handle_exit\|def _handle_status" aixcode/commands/handlers/worktree.py` + 单测）
+
+### 1.6 isolation 接入
+
+- [x] `AgentDef` 加 `isolation` 字段 + parser 映射（`grep -n "isolation" aixcode/agents/parser.py` + 单测）
+- [x] `AgentToolParams` 加 `isolation` + `AgentTool.__init__` 接 `worktree_manager` + `_execute_with_worktree`（`grep -n "isolation\|worktree_manager\|def _execute_with_worktree\|build_worktree_notice\|generate_worktree_name\|auto_cleanup" aixcode/tools/agent_tool.py` + 单测）
 
 ## 2. 接入完整性（杜绝死代码）
 
-- [x] `grep -rn "AgentTool(" aixcode --include="*.py"` 命中 `aixcode/__main__.py` 一个非测试装配点
-- [x] `registry.register(agent_tool)` 在 `__main__.py`，依赖（agent_loader/task_manager/trace_manager/parent_agent/provider_config/enable_fork）齐全注入（`grep -n "AgentTool\|register(agent_tool\|AgentLoader\|TaskManager\|TraceManager" aixcode/__main__.py`）
-- [x] `task_manager.poll_completed` + `inject_task_notifications` 在 `aixcode/app.py` 主循环调用（`grep -n "poll_completed\|inject_task_notifications" aixcode/app.py`）
-- [x] `task_manager.adopt_running` 在 `app.py` 中断路径调用（`grep -n "adopt_running" aixcode/app.py`）
-- [x] `AixCodeApp.__init__` 含 `task_manager`/`trace_manager` 字段；`CommandContext.config` 塞 `"task_manager"`/`"trace_manager"`（`grep -n "task_manager\|trace_manager" aixcode/app.py`）
-- [x] `/tasks`·`/trace` 加入 `ALL_COMMANDS`（`grep -n "TASKS_COMMAND\|TRACE_COMMAND" aixcode/commands/handlers/__init__.py`）
-- [x] 子 Agent 复用父 `hook_engine`（不新建）（`grep -rn "hook_engine" aixcode/tools/agent_tool.py`）
+- [x] `grep -rn "WorktreeManager(" aixcode --include="*.py"` 命中 `aixcode/__main__.py` 非测试装配点
+- [x] `grep -n "EnterWorktreeTool\|ExitWorktreeTool\|registry.register" aixcode/__main__.py` 两工具均注册
+- [x] `grep -n "restore_session" aixcode/__main__.py` 启动恢复调用且命中时设 `agent.work_dir`
+- [x] `grep -n "worktree_manager" aixcode/tools/agent_tool.py` AgentTool 接收并使用
+- [x] `grep -n "create_worktree_command\|start_stale_cleanup_task\|add_cache_clear_callback\|worktree_manager" aixcode/app.py` 命令注册 + 后台清理 task + 缓存回调
+- [x] `grep -n "auto_cleanup\|build_worktree_notice\|generate_worktree_name" aixcode/tools/agent_tool.py` 子 Agent 隔离全链路有真实调用
 
 ## 3. 编译与测试
 
 - [x] `python -m compileall aixcode tests` 通过
-- [x] `python -m pytest tests/test_subagent.py -q` 全部通过，覆盖：parser / loader / tool_filter（各层）/ fork（嵌套拒绝 + deepcopy + interrupted）/ trace / task_manager（状态机）/ notification / AgentToolParams / AgentTool.execute 三路径 / 模型路由
-- [x] `python -m pytest -q` 全绿（ch01–12 既有 + ch13 新增，不少于 ch12 末 502）
-- [x] `python -c "from aixcode.agents.loader import AgentLoader; print(sorted(AgentLoader('.').load_all().keys()))"` 含 `explore / general-purpose / plan`
-- [x] `python -c "from aixcode.tools.agent_tool import AgentTool; print(AgentTool.name, AgentTool.category)"` 输出 `Agent command`
+- [x] `python -m pytest tests/test_worktree.py -q` 全部通过，覆盖：slug / models / changes（fail-closed）/ integration / session（往返+容错）/ setup / manager（create/enter/exit/auto_cleanup/restore + read_worktree_head_sha）/ cleanup（三层过滤）/ 两工具 / /worktree 命令 / AgentTool isolation
+- [x] `python -m pytest -q` 全绿（ch01–13 既有 585 + ch14 新增）
+- [x] `python -c "from aixcode.worktree import WorktreeManager, validate_slug, flatten_slug; print('ok')"` 无 import 错误
+- [x] `python -c "from aixcode.tools.enter_worktree import EnterWorktreeTool; from aixcode.tools.exit_worktree import ExitWorktreeTool; print(EnterWorktreeTool.name, ExitWorktreeTool.name)"` 输出 `EnterWorktree ExitWorktree`
 
-## 4. 离线 smoke（自动验证）
+## 4. 离线 smoke + 端到端验证（手动操作 TUI，PowerShell）— 本章待用户手动验收
 
-- [x] `AgentLoader('.').load_all()` 含三档；`get("plan")` 的 `disallowed_tools` 含 Agent/EditFile/WriteFile、`model=="deepseek-pro"`
-- [x] `resolve_agent_tools`：builtin agent 不含 Agent/AskUser；background 只含 `ASYNC_AGENT_ALLOWED_TOOLS`；project agent 不含 LoadSkill；`mcp_*` 直通
-- [x] `build_forked_messages` 对含 `FORK_BOILERPLATE_TAG` 的父对话抛 `ForkError`；deepcopy 不改父
-- [x] `TaskManager.launch` 跑一个返回字符串的 coro → `poll_completed` 拿到 `completed` 且 `result` 正确；`cancel` running → `cancelled`
-- [x] `format_task_notification` 输出含 `<task-notification>` 与 Task ID/Status/Result
-- [x] 装配后 `registry.get("Agent")` 非空，`description` 含 general-purpose/plan/explore；sync spawn（stub LLM 产 LoopComplete）`execute` 返回该文本
+> 离线 smoke 可自动；带「手动」的真实 TUI 项留用户。启动：`python -m aixcode`
 
-## 5. 端到端验证（手动操作 TUI，PowerShell）— 本章待用户手动验收
+- [x] 离线 smoke：真实临时 git 仓库里 `WorktreeManager.create("demo")` → `.aixcode/worktrees/demo/` + 分支 `worktree-demo` 建成；`enter` 写 `.aixcode/worktree_session.json`；`exit("demo","remove",discard_changes=True)` 删除目录与分支
+- [x] 离线 smoke：`_is_ephemeral("agent-"+8hex)` True、用户名 False；`cleanup_stale_worktrees` 对有未推送 commit 的过期 ephemeral 目录保守不删（L3 fail-closed）
+- [ ] **手动 路径 A（工具直接驱动）**：让主 Agent「用 EnterWorktree 创建名叫 demo 的工作树」→ 返回 `Created worktree at .../demo on branch worktree-demo`；在 worktree 里 WriteFile + `git commit` → `ExitWorktree({action:"remove"})` 被变更保护拒绝且含具体 `1 commit`/`N commits` → `ExitWorktree({action:"remove", discard_changes:true})` 强删成功
+- [ ] **手动 路径 B（子 Agent 自动隔离）**：主目录 WriteFile `witness.txt="original content from main agent"` → 调 `Agent({subagent_type:"<声明 isolation worktree 的类型>", prompt:"把 witness.txt 改成 ..."})` → 主目录 `witness.txt` 不变；`.aixcode/worktrees/agent-*/witness.txt` 是改后版本；有 commit 时结果末尾出现 `[Worktree preserved at ..., branch worktree-agent-...]`
+- [ ] **手动 持久化恢复**：TUI 里 `EnterWorktree({name:"crashtest"})` → `Ctrl+C` 杀进程 → `.aixcode/worktree_session.json` 仍在含 crashtest → 重启 `python -m aixcode` → `restore_session` 写回，`agent.work_dir` 已切到 worktree
+- [ ] **手动 /worktree 命令**：`/worktree create demo` 创建并进入 → `/worktree status` 显示当前 session → `/worktree list` 列出含 demo → `/worktree exit --remove --discard` 强删
 
-> 启动：`python -m aixcode`
-
-- [ ] 让主 Agent「用 explore 子 Agent 调研某模块」→ LLM 调 `Agent` 工具（subagent_type=explore）→ 同步路径子 Agent 跑完返回调研结论给主 Agent
-- [ ] 让主 Agent「在后台用 plan 子 Agent 制定计划」（run_in_background）→ 立即看到 `Task ID: ...` → 稍后主对话出现 `<task-notification>` 含结果
-- [ ] fork：让主 Agent 不指定类型「fork 出去查 X」→ 强制后台 → 完成经 notification 注入
-- [ ] `/tasks list` 列出后台任务及状态/token；`/tasks view <id>` 出详情；`/tasks cancel <id>` 取消 running 任务
-- [ ] `/trace` 列最近调用树，父子缩进 + token 汇总
-- [ ] 子 Agent 内不能再调 `Agent`（验证防递归：observe 子 Agent 的工具集不含 Agent）
-
-## 6. 上一章（ch12 Hook）遗留手动验收 — 一并由用户操作
-
-> 这两项是 ch12 落地时留下的真实 TUI 验收，代码与测试已就绪，仅需手动跑一次。
-
-- [ ] ch12：`config.yaml` 配 pre_tool_use reject hook（`tool == "Bash" && args.command =~ /rm\s+-rf/` + `action.type=prompt` + `reject: true`），让 LLM 触发匹配的 Bash 命令，工具结果为 `Hook rejected: <message>`
-- [ ] ch12：`config.yaml` 配缺 `command` 字段的非法 hook，`python -m aixcode` 启动 stderr 见 `Hook 配置错误：... requires 'command' field` 并退出码 1
-
-## 7. 文档
+## 5. 文档
 
 - [x] `spec.md` / `tasks.md` / `checklist.md` 三件套齐全于项目根目录（`ls spec.md tasks.md checklist.md`）
-- [x] `tasks.md` 13 个任务全部勾上
-- [x] `checklist.md` 全部条目勾上（§5 本章手动 TUI、§6 上章遗留两项除外，留给用户）
+- [x] `tasks.md` 16 个任务全部勾上
+- [x] `checklist.md` 全部条目勾上（§4 带「手动」的真实 TUI 项除外，留给用户）

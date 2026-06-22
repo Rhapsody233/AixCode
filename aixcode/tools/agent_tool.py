@@ -53,6 +53,7 @@ class AgentToolParams(BaseModel):
     subagent_type: str = ""
     model: str = ""
     run_in_background: bool = False
+    isolation: str | None = None
 
 
 def _build_description(loader: AgentLoader, enable_fork: bool) -> str:
@@ -88,6 +89,7 @@ class AgentTool(Tool):
         parent_agent,
         provider_config: ProviderConfig,
         enable_fork: bool = False,
+        worktree_manager=None,
     ) -> None:
         self.agent_loader = agent_loader
         self.task_manager = task_manager
@@ -95,6 +97,7 @@ class AgentTool(Tool):
         self.parent_agent = parent_agent
         self.provider_config = provider_config
         self.enable_fork = enable_fork
+        self.worktree_manager = worktree_manager
         # 实例级描述覆盖类属性（动态拼可用类型）
         self.description = _build_description(agent_loader, enable_fork)
 
@@ -172,7 +175,60 @@ class AgentTool(Tool):
                 f"未知 subagent_type: {params.subagent_type}。可用类型：{available}",
                 is_error=True,
             )
+        isolation = params.isolation or definition.isolation
+        if isolation == "worktree":
+            return await self._execute_with_worktree(params, definition)
         return await self._execute_definition(params, definition)
+
+    async def _execute_with_worktree(
+        self, params: AgentToolParams, definition: AgentDef
+    ) -> ToolResult:
+        """Agent 级 worktree 隔离：建独立 worktree → 跑子 Agent → 按变更自动清理。"""
+        if self.worktree_manager is None:
+            return ToolResult(
+                "worktree 隔离不可用（worktree_manager 未装配）。", is_error=True
+            )
+        from aixcode.worktree.integration import (
+            build_worktree_notice,
+            generate_worktree_name,
+        )
+
+        wt_name = generate_worktree_name()
+        try:
+            wt = await self.worktree_manager.create(wt_name, "HEAD")
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(f"创建 worktree 失败：{e}", is_error=True)
+
+        parent_cwd = getattr(self.parent_agent, "work_dir", ".")
+        notice = build_worktree_notice(parent_cwd, wt.path)
+        task = f"{notice}\n\n{params.prompt}"
+
+        registry = resolve_agent_tools(
+            self.parent_agent.registry, definition, is_background=False
+        )
+        model = self._select_model(params, definition)
+        client = self._create_client_for_model(model) if model else None
+        sub_agent = self._build_sub_agent(definition, registry, client, wt.path)
+        node = self.trace_manager.create(definition.agent_type)
+
+        try:
+            text = await run_to_completion(sub_agent, self._fresh_conv(task))
+        except Exception as e:  # noqa: BLE001
+            self.trace_manager.complete(node.agent_id, "failed")
+            return ToolResult(f"子 Agent 执行失败：{e}", is_error=True)
+        self.trace_manager.update(
+            node.agent_id,
+            input_tokens=getattr(sub_agent, "total_input_tokens", 0),
+            output_tokens=getattr(sub_agent, "total_output_tokens", 0),
+        )
+        self.trace_manager.complete(node.agent_id, "completed")
+
+        cleanup = await self.worktree_manager.auto_cleanup(wt_name, wt.head_commit)
+        if cleanup.kept:
+            text += (
+                f"\n\n[Worktree preserved at {cleanup.path}, branch {cleanup.branch}]"
+            )
+        return ToolResult(text)
 
     async def _execute_fork(self, params: AgentToolParams) -> ToolResult:
         if not self.enable_fork:

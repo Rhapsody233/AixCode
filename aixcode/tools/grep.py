@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from pydantic import BaseModel
 
 from aixcode.tools.base import SKIP_DIRS, Tool, ToolResult
+from aixcode.tools.workdir import resolve_path
 
 
 class GrepParams(BaseModel):
@@ -29,7 +29,7 @@ class Grep(Tool):
         except re.error as e:
             return ToolResult(f"Error: invalid regex: {e}", is_error=True)
 
-        base = Path(params.path)
+        base = resolve_path(params.path)
         glob_pat = f"**/{params.include}" if params.include else "**/*"
         matches = []
         for p in sorted(base.glob(glob_pat)):
