@@ -89,6 +89,15 @@ class TeamManager:
     def get_mailbox(self, team_name: str) -> Mailbox | None:
         return self._mailboxes.get(team_name)
 
+    def attach_external_mailbox(self, team_name: str, mailbox_dir: str) -> Mailbox:
+        """ch16：本进程是被 spawn 的队员时，接一个指向共享 mailbox 目录的句柄。
+
+        懒建目录（Mailbox.write 时才创建），不假设团队 config.json 在本进程可见。
+        """
+        mailbox = Mailbox(mailbox_dir)
+        self._mailboxes[team_name] = mailbox
+        return mailbox
+
     # --- 成员 ---
 
     def register_member(self, team_name: str, info: TeammateInfo) -> None:

@@ -2,8 +2,6 @@
 .aixcode/
 .axicode/
 
-# 含密钥，绝不提交
-config.yaml
 
 # Python 缓存与测试产物
 __pycache__/

@@ -75,6 +75,18 @@ def _build_mcp_reminder(server_names: list[str], tool_names: list[str]) -> str:
     )
 
 
+def _build_mcp_resource_catalog(resources: list[tuple]) -> str:
+    """构造一条系统提醒，列出可用 MCP 资源（按需用 ReadMcpResource 读取）。"""
+    lines = "\n".join(
+        f"- {uri}" + (f"（{desc}）" if desc else "")
+        for _server, uri, _name, desc in resources
+    )
+    return (
+        "以下 MCP 资源可用（需要时用 ReadMcpResource 按 uri 读取）：\n"
+        f"{lines}"
+    )
+
+
 def _summarize_tool(name: str, args: dict) -> str:
     """把一次工具调用渲染成简短摘要，如 'Write hello.txt (2 lines)'。"""
     file_path = args.get("file_path") or args.get("path") or ""
@@ -332,6 +344,16 @@ class AixCodeApp:
                 _build_mcp_reminder(server_names, mcp_tools)
             )
 
+        # ch16：资源（ReadMcpResource + catalog）与提示（slash command）
+        from aixcode.commands.handlers.mcp_prompt import register_mcp_prompts
+        from aixcode.tools.read_mcp_resource import ReadMcpResource
+
+        resources = await manager.register_all_resources()
+        self.agent.registry.register(ReadMcpResource(manager))
+        if resources:
+            self.conversation.add_system_reminder(_build_mcp_resource_catalog(resources))
+        await register_mcp_prompts(self.command_registry, manager)
+
     async def _shutdown_mcp(self) -> None:
         if self._mcp_manager is not None:
             await self._mcp_manager.shutdown()
@@ -401,7 +423,12 @@ class AixCodeApp:
         )
 
     def get_token_count(self) -> int:
-        return self.conversation.last_input_tokens
+        # ch16：尚无 API 真实 token 数（首轮发送前）时回退到本地预估，补盲区
+        if self.conversation.last_input_tokens:
+            return self.conversation.last_input_tokens
+        from aixcode.context.tokenizer import estimate_conversation_tokens
+
+        return estimate_conversation_tokens(self.conversation)
 
     def refresh_status(self) -> None:
         pass

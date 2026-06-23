@@ -73,6 +73,34 @@ class MCPClient:
     async def call_tool(self, name: str, args: dict):
         return await self._session.call_tool(name, args)
 
+    # --- ch16：资源与提示（SDK 直通）---
+
+    async def list_resources(self) -> list:
+        return (await self._session.list_resources()).resources
+
+    async def read_resource(self, uri) -> str:
+        """读资源，把各 contents 的文本部分拼成字符串。"""
+        result = await self._session.read_resource(uri)
+        parts = [
+            t for c in getattr(result, "contents", []) or []
+            if (t := getattr(c, "text", None))
+        ]
+        return "\n".join(parts)
+
+    async def list_prompts(self) -> list:
+        return (await self._session.list_prompts()).prompts
+
+    async def get_prompt(self, name: str, args: dict) -> str:
+        """取 prompt，把各 message 的文本内容拼成字符串。"""
+        result = await self._session.get_prompt(name, args)
+        parts = []
+        for msg in getattr(result, "messages", []) or []:
+            content = getattr(msg, "content", None)
+            t = getattr(content, "text", None)
+            if t:
+                parts.append(t)
+        return "\n".join(parts)
+
     async def close(self) -> None:
         self._alive = False
         await self._cleanup_stack()

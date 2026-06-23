@@ -21,6 +21,7 @@ class MCPManager:
         self._client_factory = client_factory
         self._configs: dict[str, MCPServerConfig] = {}
         self._clients: dict[str, MCPClient] = {}
+        self._resource_index: dict[str, str] = {}  # ch16：uri(str) → server name
 
     def load_configs(self, configs: list[MCPServerConfig]) -> None:
         for cfg in configs:
@@ -38,6 +39,48 @@ class MCPManager:
                 logger.warning("MCP server %r 连接失败：%s", name, e)
                 errors.append(f"{name}: {e}")
         return errors
+
+    # --- ch16：资源与提示发现 + 路由 ---
+
+    async def register_all_resources(self) -> list[tuple]:
+        """顺序连每个 server 收资源清单，建 uri→server 索引；单 server 失败不阻塞。"""
+        out: list[tuple] = []
+        for name in self._configs:
+            try:
+                client = await self.get_client(name)
+                for r in await client.list_resources():
+                    uri = str(getattr(r, "uri", ""))
+                    self._resource_index[uri] = name
+                    out.append(
+                        (name, uri, getattr(r, "name", ""), getattr(r, "description", ""))
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("MCP server %r 资源发现失败：%s", name, e)
+        return out
+
+    async def read_resource(self, uri) -> str:
+        """按 uri→server 索引路由到对应 client 读取；未知 uri 抛 KeyError。"""
+        server = self._resource_index.get(str(uri))
+        if server is None:
+            raise KeyError(f"未知资源 uri: {uri}")
+        client = await self.get_client(server)
+        return await client.read_resource(uri)
+
+    async def list_all_prompts(self) -> list[tuple]:
+        """顺序连每个 server 收 (server, name, description)；单 server 失败不阻塞。"""
+        out: list[tuple] = []
+        for name in self._configs:
+            try:
+                client = await self.get_client(name)
+                for p in await client.list_prompts():
+                    out.append((name, getattr(p, "name", ""), getattr(p, "description", "")))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("MCP server %r 提示发现失败：%s", name, e)
+        return out
+
+    async def get_prompt(self, server: str, name: str, args: dict) -> str:
+        client = await self.get_client(server)
+        return await client.get_prompt(name, args)
 
     async def get_client(self, name: str) -> MCPClient:
         """返回活客户端：缓存命中且存活直接复用，否则（重）建并连接。"""

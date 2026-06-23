@@ -29,6 +29,11 @@ class HookEngine:
         self.hooks = hooks
         self._prompt_messages: list[str] = []
         self._notifications: list[HookNotification] = []
+        self._agent_runner = None
+
+    def set_agent_runner(self, runner) -> None:
+        """注入 `agent` 动作执行器用的 runner：async fn(prompt) -> str（ch16）。"""
+        self._agent_runner = runner
 
     def find_matching_hooks(self, event: str, ctx: HookContext) -> list[Hook]:
         """三层过滤：事件名 + should_run（once）+ condition。"""
@@ -52,7 +57,7 @@ class HookEngine:
     async def _run_single(self, hook: Hook, ctx: HookContext) -> None:
         hook.mark_executed()
         try:
-            result = await execute_action(hook.action, ctx)
+            result = await execute_action(hook.action, ctx, self._agent_runner)
         except Exception as e:  # 错误隔离：绝不让 hook 拖垮主流程
             log.warning("hook %r execution failed: %s", hook.id, e)
             self._notifications.append(
@@ -70,7 +75,7 @@ class HookEngine:
         for hook in self.find_matching_hooks("pre_tool_use", ctx):
             hook.mark_executed()
             try:
-                result = await execute_action(hook.action, ctx)
+                result = await execute_action(hook.action, ctx, self._agent_runner)
             except Exception as e:  # 错误隔离
                 log.warning("pre_tool hook %r failed: %s", hook.id, e)
                 continue

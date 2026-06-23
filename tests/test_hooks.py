@@ -251,17 +251,71 @@ def test_execute_http_mock(monkeypatch):
     assert "200" in res.output
 
 
-def test_execute_agent_stub():
+def test_execute_agent_no_runner():
     res = asyncio.run(execute_agent(Action(type="agent", prompt="p"),
-                                    HookContext(event_name="turn_start")))
+                                    HookContext(event_name="turn_start"), None))
+    assert res.success is False
+
+
+def test_execute_agent_with_runner():
+    async def runner(prompt):
+        return f"ran:{prompt}"
+
+    res = asyncio.run(execute_agent(Action(type="agent", prompt="do it"),
+                                    HookContext(event_name="turn_start"), runner))
     assert res.success is True
-    assert "not yet implemented" in res.output
+    assert res.output == "ran:do it"
+
+
+def test_execute_agent_runner_raises():
+    async def runner(prompt):
+        raise RuntimeError("boom")
+
+    res = asyncio.run(execute_agent(Action(type="agent", prompt="p"),
+                                    HookContext(event_name="turn_start"), runner))
+    assert res.success is False
+
+
+def test_execute_agent_expands_prompt():
+    async def runner(prompt):
+        return prompt
+
+    ctx = HookContext(event_name="post_tool_use", tool_name="Bash")
+    res = asyncio.run(execute_agent(Action(type="agent", prompt="ran $TOOL_NAME"),
+                                    ctx, runner))
+    assert res.output == "ran Bash"
 
 
 def test_execute_action_dispatch():
     res = asyncio.run(execute_action(Action(type="prompt", message="x"),
                                      HookContext(event_name="turn_start")))
     assert res.output == "x"
+
+
+def test_execute_action_agent_threads_runner():
+    async def runner(prompt):
+        return f"got:{prompt}"
+
+    res = asyncio.run(execute_action(Action(type="agent", prompt="hey"),
+                                     HookContext(event_name="turn_start"), runner))
+    assert res.success is True
+    assert res.output == "got:hey"
+
+
+def test_hook_engine_agent_runner_integration():
+    from aixcode.hooks.engine import HookEngine
+    from aixcode.hooks.models import Hook
+
+    async def runner(prompt):
+        return f"agent ran: {prompt}"
+
+    hook = Hook(id="h1", event="turn_start",
+                action=Action(type="agent", prompt="investigate"))
+    engine = HookEngine([hook])
+    engine.set_agent_runner(runner)
+    asyncio.run(engine.run_hooks("turn_start", HookContext(event_name="turn_start")))
+    notes = engine.drain_notifications()
+    assert any(n.success and "agent ran: investigate" in n.output for n in notes)
 
 
 def test_execute_action_unknown_type():

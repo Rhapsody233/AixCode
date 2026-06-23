@@ -432,3 +432,221 @@ def test_shutdown_idempotent():
     assert created["s"].closes == 1
     # 二次 shutdown 不抛
     asyncio.run(mgr.shutdown())
+
+
+# --- ch16 T6: MCPClient resources/prompts -----------------------------------
+
+class _Resources:
+    def __init__(self, resources):
+        self.resources = resources
+
+
+class _ReadResult:
+    def __init__(self, contents):
+        self.contents = contents
+
+
+class _Prompts:
+    def __init__(self, prompts):
+        self.prompts = prompts
+
+
+class _PromptMsg:
+    def __init__(self, text):
+        self.content = _Text(text)
+
+
+class _GetPromptResult:
+    def __init__(self, messages):
+        self.messages = messages
+
+
+class _ResPromptSession:
+    def __init__(self, resources=None, read=None, prompts=None, prompt_result=None):
+        self._resources = resources or []
+        self._read = read
+        self._prompts = prompts or []
+        self._prompt_result = prompt_result
+
+    async def list_resources(self):
+        return _Resources(self._resources)
+
+    async def read_resource(self, uri):
+        return self._read
+
+    async def list_prompts(self):
+        return _Prompts(self._prompts)
+
+    async def get_prompt(self, name, args):
+        return self._prompt_result
+
+
+class _Res:
+    def __init__(self, uri, name="", description=""):
+        self.uri = uri
+        self.name = name
+        self.description = description
+
+
+def test_client_list_resources_delegates():
+    client = MCPClient(_Cfg(name="s", command="x"))
+    client._session = _ResPromptSession(resources=[_Res("mem://a"), _Res("mem://b")])
+    res = asyncio.run(client.list_resources())
+    assert [r.uri for r in res] == ["mem://a", "mem://b"]
+
+
+def test_client_read_resource_joins_text():
+    client = MCPClient(_Cfg(name="s", command="x"))
+    client._session = _ResPromptSession(
+        read=_ReadResult([_Text("part1"), _Text("part2")])
+    )
+    text = asyncio.run(client.read_resource("mem://a"))
+    assert "part1" in text and "part2" in text
+
+
+def test_client_list_prompts_delegates():
+    client = MCPClient(_Cfg(name="s", command="x"))
+
+    class _P:
+        def __init__(self, name):
+            self.name = name
+            self.description = ""
+
+    client._session = _ResPromptSession(prompts=[_P("p1"), _P("p2")])
+    prompts = asyncio.run(client.list_prompts())
+    assert [p.name for p in prompts] == ["p1", "p2"]
+
+
+def test_client_get_prompt_joins_messages():
+    client = MCPClient(_Cfg(name="s", command="x"))
+    client._session = _ResPromptSession(
+        prompt_result=_GetPromptResult([_PromptMsg("hello"), _PromptMsg("world")])
+    )
+    text = asyncio.run(client.get_prompt("p1", {"a": "1"}))
+    assert "hello" in text and "world" in text
+
+
+# --- ch16 T7: MCPManager 资源/提示发现 + 路由 -------------------------------
+
+class _ResFakeClient:
+    def __init__(self, config, resources=None, prompts=None, read_map=None,
+                 prompt_text="", connect_error=None):
+        self.config = config
+        self.name = config.name
+        self._resources = resources or []
+        self._prompts = prompts or []
+        self._read_map = read_map or {}
+        self._prompt_text = prompt_text
+        self._connect_error = connect_error
+        self._alive = False
+
+    @property
+    def is_alive(self):
+        return self._alive
+
+    async def connect(self):
+        if self._connect_error:
+            raise self._connect_error
+        self._alive = True
+
+    async def list_resources(self):
+        return list(self._resources)
+
+    async def read_resource(self, uri):
+        return self._read_map.get(str(uri), "")
+
+    async def list_prompts(self):
+        return list(self._prompts)
+
+    async def get_prompt(self, name, args):
+        return f"{self.name}:{name}:{self._prompt_text}"
+
+    async def close(self):
+        self._alive = False
+
+
+class _Prompt:
+    def __init__(self, name, description=""):
+        self.name = name
+        self.description = description
+
+
+def _res_manager(behaviors):
+    def factory(config):
+        return _ResFakeClient(config, **behaviors.get(config.name, {}))
+    return MCPManager(client_factory=factory)
+
+
+def test_register_all_resources_builds_index():
+    mgr = _res_manager({
+        "s1": {"resources": [_Res("mem://a", "A"), _Res("mem://b", "B")],
+               "read_map": {"mem://a": "content-A"}},
+        "s2": {"resources": [_Res("doc://c", "C")]},
+    })
+    mgr.load_configs([_Cfg(name="s1", command="x"), _Cfg(name="s2", command="y")])
+    listing = asyncio.run(mgr.register_all_resources())
+    uris = {row[1] for row in listing}
+    assert uris == {"mem://a", "mem://b", "doc://c"}
+    # 路由读取到正确 server
+    assert asyncio.run(mgr.read_resource("mem://a")) == "content-A"
+
+
+def test_register_all_resources_partial_failure():
+    mgr = _res_manager({
+        "bad": {"connect_error": RuntimeError("boom")},
+        "good": {"resources": [_Res("mem://x", "X")]},
+    })
+    mgr.load_configs([_Cfg(name="bad", command="x"), _Cfg(name="good", command="y")])
+    listing = asyncio.run(mgr.register_all_resources())
+    assert {row[1] for row in listing} == {"mem://x"}
+
+
+def test_read_resource_unknown_uri_raises():
+    mgr = _res_manager({})
+    mgr.load_configs([])
+    with pytest.raises(KeyError):
+        asyncio.run(mgr.read_resource("mem://nope"))
+
+
+def test_list_all_prompts_and_get_prompt():
+    mgr = _res_manager({
+        "s1": {"prompts": [_Prompt("greet"), _Prompt("bye")], "prompt_text": "hi"},
+    })
+    mgr.load_configs([_Cfg(name="s1", command="x")])
+    prompts = asyncio.run(mgr.list_all_prompts())
+    assert ("s1", "greet", "") in prompts
+    assert asyncio.run(mgr.get_prompt("s1", "greet", {})) == "s1:greet:hi"
+
+
+# --- ch16 T8: ReadMcpResource 工具 ------------------------------------------
+
+from aixcode.tools.read_mcp_resource import ReadMcpResource  # noqa: E402
+
+
+class _RMRManager:
+    def __init__(self, mapping):
+        self._m = mapping
+
+    async def read_resource(self, uri):
+        if uri not in self._m:
+            raise KeyError(uri)
+        return self._m[uri]
+
+
+def test_read_mcp_resource_returns_text():
+    tool = ReadMcpResource(_RMRManager({"mem://a": "hello resource"}))
+    res = asyncio.run(tool.execute(tool.params_model(uri="mem://a")))
+    assert not res.is_error
+    assert "hello resource" in res.output
+
+
+def test_read_mcp_resource_unknown_is_error():
+    tool = ReadMcpResource(_RMRManager({}))
+    res = asyncio.run(tool.execute(tool.params_model(uri="mem://nope")))
+    assert res.is_error
+
+
+def test_read_mcp_resource_meta():
+    assert ReadMcpResource.name == "ReadMcpResource"
+    assert ReadMcpResource.should_defer is True
+    assert ReadMcpResource.category == "read"

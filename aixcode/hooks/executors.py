@@ -106,10 +106,20 @@ async def execute_http(action: Action, ctx: HookContext) -> ActionResult:
     return ActionResult(f"HTTP {status}: {text}", success=200 <= status < 300)
 
 
-async def execute_agent(action: Action, ctx: HookContext) -> ActionResult:
-    """子 Agent 动作：当前为 stub。"""
-    log.info("agent action stub (prompt=%r)", action.prompt)
-    return ActionResult("agent executor not yet implemented", success=True)
+async def execute_agent(action: Action, ctx: HookContext, agent_runner=None) -> ActionResult:
+    """子 Agent 动作：经注入的 runner spawn 子 Agent 跑展开后的 prompt（ch16）。
+
+    runner 为 None（未注入）或抛异常时优雅降级为 success=False，不破坏 hook 链。
+    """
+    if agent_runner is None:
+        return ActionResult("agent executor 未注入 runner", success=False)
+    prompt = ctx.expand(action.prompt or "")
+    try:
+        text = await agent_runner(prompt)
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent action failed: %s", e)
+        return ActionResult(f"agent action failed: {e}", success=False)
+    return ActionResult(text, success=True)
 
 
 _EXECUTOR_MAP = {
@@ -120,9 +130,13 @@ _EXECUTOR_MAP = {
 }
 
 
-async def execute_action(action: Action, ctx: HookContext) -> ActionResult:
-    """按 action.type 派发到对应执行器；未知类型返回 success=False。"""
+async def execute_action(
+    action: Action, ctx: HookContext, agent_runner=None
+) -> ActionResult:
+    """按 action.type 派发到对应执行器；`agent` 类型透传 runner；未知类型 success=False。"""
     fn = _EXECUTOR_MAP.get(action.type)
     if fn is None:
         return ActionResult(f"unknown action type: {action.type}", success=False)
+    if action.type == "agent":
+        return await execute_agent(action, ctx, agent_runner)
     return await fn(action, ctx)

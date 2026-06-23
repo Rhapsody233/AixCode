@@ -1,0 +1,5 @@
+# AixCode 供应商配置
+protocol: openai                      # 走哪家协议（openai 兼容协议，承载 Deepseek）
+model: deepseek-chat              # deepseek-reasoner 带思考；deepseek-chat 不带
+base_url: https://api.deepseek.com    # 请求地址
+api_key:      # 认证 key（明文）
